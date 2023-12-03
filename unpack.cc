@@ -3,17 +3,20 @@
 #include <map>
 #include <string.h>
 #include <assert.h>
+#include <stdint.h>
 #include "unpack.h"
-
 //
 // turn bits into a 128-bit integer.
 // most significant bit first.
 //
-__int128
+int64_t
 un(int a77[], int start, int len)
 {
-  __int128 x = 0;
-
+  int64_t x = 0;
+  if (!(len < (int) sizeof(x)*8 && start >= 0 && start + len <= 77)) {
+    fprintf(stdout, "data returned requires int128_t - skipping\n");
+    return x;
+  }
   assert(len < (int) sizeof(x)*8 && start >= 0 && start + len <= 77);
   for(int i = 0; i < len; i++){
     x <<= 1;
@@ -317,7 +320,7 @@ unpack_0_0(int a77[])
 {
   // the 42 possible characters.
   const char *cc = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ+-./?";
-  __int128 x = un(a77, 0, 71);
+  int64_t x = un(a77, 0, 71);
   std::string msg = "0123456789123";
   for(int i = 0; i < 13; i++){
     msg[13-1-i] = cc[x % 42];

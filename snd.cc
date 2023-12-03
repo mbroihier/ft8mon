@@ -166,6 +166,10 @@ SoundIn::open(std::string card, std::string chan, int rate)
   } else if(card == "sdrip"){
     sin = new SDRIPSoundIn(chan, rate);
 #endif
+#ifdef USE_RTLSDR
+  } else if(card == "rtl-sdr"){
+    sin = new RTLSDRSoundIn(chan, rate);
+#endif
   } else {
     fprintf(stderr, "SoundIn::open(%s, %s): type not recognized\n", card.c_str(), chan.c_str());
     exit(1);
@@ -630,6 +634,312 @@ AirspySoundIn::get(int n, double &t0, int latest)
     if((int) v2.size() > olen){
       v2.resize(olen);
     }
+    return v2;
+  }
+}
+#endif
+
+#if 0
+void
+eval_filter(float h[], int h_len, int rate)
+{
+  for(double hz = 4000; hz < rate / 2 && hz < 8000; hz += 20){
+    firfilt_crcf ff = firfilt_crcf_create(h, h_len);
+    double phase = 0;
+    double sum = 0;
+    int nn = 100 * h_len;
+    for(int i = 0; i < nn; i++){
+      liquid_float_complex x, y;
+      x.real = cos(phase);
+      x.imag = sin(phase);
+      phase += hz * 2 * M_PI / rate;
+      firfilt_crcf_push(ff, x);
+      firfilt_crcf_execute(ff, &y);
+      sum += sqrt(y.real*y.real + y.imag*y.imag);
+    }
+    sum /= nn;
+    printf("%.1f %f\n", hz, sum);
+    fflush(stdout);
+    firfilt_crcf_destroy(ff);
+  }
+}
+#endif
+#ifdef USE_RTLSDR
+//
+// chan argument is the frequency in megahertz
+// rate is expect to always be 12000
+//
+RTLSDRSoundIn::RTLSDRSoundIn(std::string chan, int rate)
+{
+  rtl_device = 0;
+  int rtl_result = rtlsdr_open(&rtl_device, 0);
+  if (rtl_result < 0) {
+    fprintf(stderr, "ERROR: Failed to open RTL-SDR device 0\n");
+    exit(-1);
+  }
+  
+  freq = 10 * 1000 * 1000;
+  rtlsdr_rate = 300000;  // this is the sampling rate we will use for this dongle
+  time_ = -1;
+  count_ = 0;
+
+  if(rate == -1){
+    rate_ = 12000;
+  } else {
+    rate_ = rate;
+  }
+
+  assert(rate_ == 12000);  // not expecting anything else
+  
+  freq = atof(chan.c_str()) * 1000000.0;
+
+  if (freq < 28000000) {
+    rtl_result = rtlsdr_set_direct_sampling(rtl_device, 2);
+    if (rtl_result < 0) {
+      fprintf(stderr, "ERROR: Failed to set direct sampling mode.\n");
+      rtlsdr_close(rtl_device);
+      exit(-1);
+    }
+  } else {
+    rtl_result = rtlsdr_set_direct_sampling(rtl_device, 0);
+    if (rtl_result < 0) {
+      fprintf(stderr, "ERROR: Failed to set normal sampling mode.\n");
+      rtlsdr_close(rtl_device);
+      exit(-1);
+    }
+  }
+  rtl_result = rtlsdr_set_sample_rate(rtl_device, rtlsdr_rate);
+  if (rtl_result < 0) {
+    fprintf(stderr, "ERROR: Failed to set sampling rate of: %d\n", rtlsdr_rate);
+    rtlsdr_close(rtl_device);
+    exit(-1);
+  }
+  //rtl_result = rtlsdr_set_tuner_gain(rtl_device, 0);  // set to automatic gain control
+  rtl_result = rtlsdr_set_tuner_gain(rtl_device, 35);
+  if (rtl_result < 0) {
+    fprintf(stderr, "ERROR: Failed to set tuner gain\n");
+    exit(-1);
+  }
+  rtl_result = rtlsdr_set_freq_correction(rtl_device, 0);
+  if (rtl_result < 0) {
+    fprintf(stderr, "ERROR: Failed to set ppm error\n");
+    //exit(-1);
+  }
+  rtl_result = rtlsdr_set_center_freq(rtl_device, freq + rtlsdr_rate/4);
+  if (rtl_result < 0) {
+    fprintf(stderr, "ERROR: Failed to set frequency %d\n", freq);
+    rtlsdr_close(rtl_device);
+    exit(-1);
+  }
+  rtl_result = rtlsdr_reset_buffer(rtl_device);
+  auto wrapper = []() {
+      rtlsdr_read_async(rtl_device, rtlsdr_callback, NULL, 0, 4 * 16384);
+      return 0;
+  };
+
+  dongleThread = new std::thread(wrapper);
+  if (rtl_result < 0) {
+    fprintf(stderr, "ERROR: Failded to reset buffers\n");
+    rtlsdr_close(rtl_device);
+    exit(-1);
+  }
+  fprintf(stderr, "RTL-SDR initialization complete, sampling at %d Hz, at dial frequency %d Hz, center frequency"
+          " of %d Hz\n", rtlsdr_rate, freq, freq + rtlsdr_rate/4 + 1500);
+
+  if ((rtlsdr_rate % rate) != 0) {  // check that we can decimate to detection rate
+    fprintf(stderr, "raw sampling rate inconsistent with detection rate\n");
+    rtlsdr_close(rtl_device);
+    exit(-1);
+  }
+
+  // Liquid DSP filter
+  int h_len = estimate_req_filter_len(0.01, 60.0);
+  float h[h_len];
+  double cutoff = 0.25;  // low pass, half the bandwidth
+  liquid_firdes_kaiser(h_len, cutoff, 60.0, 0.0, h);
+
+  fprintf(stderr, "creating a bandpass filter with cutoff at %5.3f, rate = %d, rtlsdr_rate = %d, len = %d\n",
+          cutoff, rate, rtlsdr_rate, h_len);
+  filter_ = firfilt_crcf_create(h, h_len);
+}
+
+
+void
+RTLSDRSoundIn::rtlsdr_callback(unsigned char *samples, uint32_t samples_count, void *ctx) {
+  int8_t *sigIn = (int8_t*) samples;
+  dataLock.lock();
+  for (uint32_t i = 0; i< samples_count; i++) {
+    signal_r[signalBufferIndex] = *sigIn++ - 128;
+    if (signalBufferIndex++ >= SIGNAL_BUFFER_SIZE) {
+      signalBufferIndex = 0;
+    }
+  }
+  time_ = now();
+  dataLock.unlock();
+}
+
+int
+RTLSDRSoundIn::set_freq(int hz)
+{
+  int rtl_result = rtlsdr_set_center_freq(rtl_device, hz);
+  if (rtl_result < 0) {
+    fprintf(stderr, "ERROR: Failed to set frequency\n");
+    exit(-1);
+  }
+  freq = hz;
+  if (freq < 28000000) {
+    rtl_result = rtlsdr_set_direct_sampling(rtl_device, 2);
+    if (rtl_result < 0) {
+      fprintf(stderr, "ERROR: Failed to set direct sampling mode.\n");
+      exit(-1);
+    }
+  } else {
+    rtl_result = rtlsdr_set_direct_sampling(rtl_device, 0);
+    if (rtl_result < 0) {
+      fprintf(stderr, "ERROR: Failed to set normal sampling mode.\n");
+      exit(-1);
+    }
+  }
+  
+  return hz;
+}
+
+void
+RTLSDRSoundIn::start()
+{
+}
+
+
+// UNIX time of first sample in t0.
+std::vector<double>
+RTLSDRSoundIn::get(int n, double &t0, int latest)
+{
+  std::vector<double> nothing;
+
+  if(time_ < 0 && signalBufferIndex == 0){
+    // no input has ever arrived.
+    t0 = -1;
+    return nothing;
+  }
+
+  time_t tx = now();
+  struct tm result;
+  gmtime_r(&tx, &result);
+  fprintf(stderr,"%02d:%02d:%02d get wants %d samples assumed to be at rate %d\n",
+         result.tm_hour,
+         result.tm_min,
+         result.tm_sec,
+         n, rate_);
+  dataLock.lock();  // wait until we have access to data
+  t0 = time_ - 15;  // calculate the first sample time which should be 15 seconds from the last sample time
+
+  int i = signalBufferIndex - rtlsdr_rate * 15 * 2;
+  if (i < 0) {
+    i = SIGNAL_BUFFER_SIZE + i;
+  }
+  fprintf(stderr, "get - current index is %d\n", signalBufferIndex);
+  dataLock.unlock();  // note that the signal buffer will now be written into while it is being used
+  float resampleInterval = rtlsdr_rate / rate_;
+  float inverseResampleInterval = 1.0 / resampleInterval;
+  int filteredSegmentSize = n * resampleInterval * 2;
+  fprintf(stderr, "making a working sample buffer of size %d\n", filteredSegmentSize);
+  int8_t * workingSample = (int8_t *) malloc(filteredSegmentSize);
+  fprintf(stderr, "making a copy to work with that is frequency shifted by %d\n", rtlsdr_rate/4);
+  int8_t * endOfBuffer = &signal_r[SIGNAL_BUFFER_SIZE];
+  int8_t * headOfBuffer = &signal_r[i];
+  for (int j = 0; j < filteredSegmentSize; j += 8) {  // make a frequency shifted copy in a safe working space
+    workingSample[j+0] = *headOfBuffer++;  // signal_r[i+j+0];
+    if (headOfBuffer == endOfBuffer) headOfBuffer = &signal_r[0];  // wrap if the end
+    workingSample[j+1] = *headOfBuffer++;  // signal_r[i+j+1];
+    if (headOfBuffer == endOfBuffer) headOfBuffer = &signal_r[0];  // wrap if the end
+    workingSample[j+3] = *headOfBuffer++;  // signal_r[i+j+2];
+    if (headOfBuffer == endOfBuffer) headOfBuffer = &signal_r[0];  // wrap if the end
+    workingSample[j+2] = -*headOfBuffer++; //-signal_r[i+j+3];
+    if (headOfBuffer == endOfBuffer) headOfBuffer = &signal_r[0];  // wrap if the end
+    workingSample[j+4] = -*headOfBuffer++; //-signal_r[i+j+4];
+    if (headOfBuffer == endOfBuffer) headOfBuffer = &signal_r[0];  // wrap if the end
+    workingSample[j+5] = -*headOfBuffer++; //-signal_r[i+j+5];
+    if (headOfBuffer == endOfBuffer) headOfBuffer = &signal_r[0];  // wrap if the end
+    workingSample[j+7] = -*headOfBuffer++; //-signal_r[i+j+6];
+    if (headOfBuffer == endOfBuffer) headOfBuffer = &signal_r[0];  // wrap if the end
+    workingSample[j+6] = *headOfBuffer++;  //signal_r[i+j+7];
+    if (headOfBuffer == endOfBuffer) headOfBuffer = &signal_r[0];  // wrap if the end
+  }
+  fprintf(stderr, "signal shifted\n");
+  // now run this through a comb filter and select every nth sample to store as as the audio signal
+  int IIntegrator1= 0.0;
+  int QIntegrator1 = 0.0;
+  int IIntegrator2= 0.0;
+  int QIntegrator2 = 0.0;
+  int Iy1 = 0.0;
+  int It1z = 0.0;
+  int It1y = 0.0;
+  int Qy1 = 0.0;
+  int Qt1z = 0.0;
+  int Qt1y = 0.0;
+  int Iy2 = 0.0;
+  int It2z = 0.0;
+  int It2y = 0.0;
+  int Qy2 = 0.0;
+  int Qt2z = 0.0;
+  int Qt2y = 0.0;
+  int decimation = resampleInterval;
+
+  int8_t * sample = workingSample;
+  std::vector<std::complex<double>> v1;
+  liquid_float_complex x, y;
+  for (int j = 0; j < filteredSegmentSize; j += decimation*2) {
+    for (int decimationCount = 0; decimationCount < decimation; decimationCount++) {
+      IIntegrator1 += *sample++;
+      QIntegrator1 += *sample++;
+      IIntegrator2 += IIntegrator1;
+      QIntegrator2 += QIntegrator2;
+    }
+    Iy1 = IIntegrator2 - It1z;
+    It1z = It1y;
+    It1y = IIntegrator2;
+    Qy1 = QIntegrator2 - Qt1z;
+    Qt1z = Qt1y;
+    Qt1y = QIntegrator2;
+
+    Iy2 = Iy1 - It2z;
+    It2z = It2y;
+    It2y = Iy1;
+    Qy2 = Qy1 - Qt2z;
+    Qt2z = Qt2y;
+    Qt2y = Qy1;
+    x.real = Iy2;
+    x.imag = Qy2;
+    firfilt_crcf_push(filter_, x);
+    firfilt_crcf_execute(filter_, &y);
+    v1.push_back(std::complex<double>(y.real, y.imag));
+  }
+  free(workingSample);
+  fprintf(stderr, "signal comb filtered and decimated - signal size: %d\n", v1.size());
+  if(v1.size() < 2){
+    // analytic() demands more than one sample.
+    return vreal(v1);
+  } else {
+    // pad to increase chances that we can re-use an FFT plan.
+    int olen = v1.size();
+    int quantum;
+    fprintf(stderr, "iq size was %d, rate() was %d\n", olen, rate());
+    if(olen > rate() * 5){
+      quantum = rate();
+    } else if(olen > 1000){
+      quantum = 1000;
+    } else {
+      quantum = 100;
+    }
+    int needed = quantum - (olen % quantum);
+    if(needed != quantum){
+      v1.resize(v1.size() + needed, 0.0);
+    }
+    std::vector<double> v2 = iq2usb(v1);
+    if((int) v2.size() > olen){
+      v2.resize(olen);
+    }
+    fprintf(stderr, "get is sending back %d samples\n", v2.size());
     return v2;
   }
 }

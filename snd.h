@@ -3,7 +3,7 @@
 
 #include <math.h>
 #include <assert.h>
-#if defined(USE_AIRSPYHF) || defined(USE_HPSDR) || defined(USE_SDRIP)
+#if defined(USE_AIRSPYHF) || defined(USE_HPSDR) || defined(USE_SDRIP) || defined(USE_RTLSDR)
 #include <liquid/liquid.h>
 #endif
 #include <complex>
@@ -20,6 +20,10 @@
 #include "sdrip.h"
 #endif
 #include "cloudsdr.h"
+#ifdef USE_RTLSDR
+#include <mutex>
+#include <rtl-sdr.h>
+#endif
 
 void snd_init();
 void snd_list();
@@ -36,6 +40,7 @@ public:
   void levels();
   virtual int set_freq(int) { return -1; }
   static SoundIn *open(std::string card, std::string chan, int rate);
+  virtual ~SoundIn() { fprintf(stderr, "exiting object of base class SoundIn\n"); }
 };
 
 class CardSoundIn : public SoundIn {
@@ -140,6 +145,51 @@ class AirspySoundIn : public SoundIn {
 
   static int cb1(airspyhf_transfer_t *);
   int cb2(airspyhf_transfer_t *);
+};
+#endif
+
+#ifdef USE_RTLSDR
+class RTLSDRSoundIn : public SoundIn {
+ private:
+  unsigned long long serial_;
+  unsigned int freq;
+  int rtlsdr_rate; // 300000
+  int rate_; // 12000
+  long long count_; // of samples, for rate reduction.
+  char hostname_[64];
+
+  static void rtlsdr_callback(unsigned char *samples, uint32_t samples_count, void *ctx);
+  firfilt_crcf filter_;
+
+ public:
+  static double time_; // of most recent sample
+  static rtlsdr_dev_t *rtl_device;
+  static int constexpr SIGNAL_BUFFER_SIZE = 1200000 * 35 * 2;  // maximum sample frequency of 1200000 S/s
+  static int8_t signal_r[SIGNAL_BUFFER_SIZE];  //raw
+  static uint32_t signalBufferIndex;
+  static std::mutex dataLock;
+  static std::thread * dongleThread;
+  RTLSDRSoundIn(std::string chan, int rate);
+  ~RTLSDRSoundIn() {
+    fprintf(stderr, "destructor of RTLSDRSoundIn\n");
+    if (dongleThread) {
+      fprintf(stderr, "stopping read from dongle\n");
+      rtlsdr_cancel_async(rtl_device);
+      fprintf(stderr, "closing dongle\n");
+      rtlsdr_close(rtl_device);
+      fprintf(stderr, "destroying liquid-dsp filter\n");
+      firfilt_crcf_destroy(filter_);
+      dongleThread->join();
+      fprintf(stderr, "dongle thread terminated\n");
+    }
+  }
+  void start();
+  std::vector<double> get(int n, double &t0, int latest);
+  bool has_iq() { return true; }
+  //std::vector<std::complex<double>> get_iq(int n, double &t0, int latest);
+  int rate() { return rate_; }
+  int set_freq(int);
+
 };
 #endif
 

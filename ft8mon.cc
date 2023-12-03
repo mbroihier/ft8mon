@@ -4,6 +4,7 @@
 // Robert Morris, AB1HL
 //
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -82,6 +83,23 @@ usage()
   exit(1);
 }
 
+#ifdef USE_RTLSDR
+double RTLSDRSoundIn::time_ = -1;
+rtlsdr_dev_t *  RTLSDRSoundIn::rtl_device = 0;
+std::thread * RTLSDRSoundIn::dongleThread;
+std::mutex RTLSDRSoundIn::dataLock;
+uint32_t RTLSDRSoundIn::signalBufferIndex = 0;
+int8_t RTLSDRSoundIn::signal_r[RTLSDRSoundIn::SIGNAL_BUFFER_SIZE];
+#endif
+
+bool stayInProgram = true;
+
+void sigint_callback_handler(int signum) {
+  fprintf(stderr, "caught signal %d\n", signum);
+  stayInProgram = false;
+}
+
+
 int
 main(int argc, char *argv[])
 {
@@ -94,13 +112,22 @@ main(int argc, char *argv[])
   extern int nthreads;
   nthreads = 4; // multi-core
 
+  signal(SIGINT, &sigint_callback_handler);
+  signal(SIGTERM, &sigint_callback_handler);
+  signal(SIGILL, &sigint_callback_handler);
+  signal(SIGFPE, &sigint_callback_handler);
+  signal(SIGSEGV, &sigint_callback_handler);
+  signal(SIGABRT, &sigint_callback_handler);
+  
+  
   if(argc == 4 && strcmp(argv[1], "-card") == 0){
     int wanted_rate = 12000;
     SoundIn *sin = SoundIn::open(argv[2], argv[3], wanted_rate);
     sin->start();
     int rate = sin->rate();
+    fprintf(stderr, "rate in main program: %d\n",rate);
 
-    while(1){
+    while(stayInProgram){
       // sleep until 14 seconds into the next 15-second cycle.
       double tt = now();
       long long cycle_start = tt - ((long long)tt % 15);
@@ -113,6 +140,7 @@ main(int argc, char *argv[])
         // not the oldest buffered. it causes samples before the
         // most recent 15 seconds to be discarded.
         std::vector<double> samples = sin->get(15 * rate, ttt_start, 1);
+        fprintf(stderr, "get took about %5.2f seconds\n", now() - tt);
 
         // ttt_start is UNIX time of samples[0].
         double ttt_end = ttt_start + samples.size() / rate;
@@ -125,11 +153,6 @@ main(int argc, char *argv[])
           struct tm result;
           time_t tx = cycle_start;
           gmtime_r(&tx, &result);
-          printf("%02d:%02d:%02d decodes: %d\n",
-                 result.tm_hour,
-                 result.tm_min,
-                 result.tm_sec,
-                 cycle_count);
 
           // make samples exactly 15 seconds, to make
           // fftw plan caching more effective.
@@ -141,17 +164,27 @@ main(int argc, char *argv[])
           cycle_already.clear();
           cycle_mu.unlock();
 
+          double s = now();
           entry(samples.data(), samples.size(), nominal_start, rate,
                 150,
                 3600, // 2900,
                 hints, hints, budget, budget, hcb,
                 0, (struct cdecode *) 0);
+          printf("%02d:%02d:%02d decodes: %d, processing time %3.1f seconds\n",
+                 result.tm_hour,
+                 result.tm_min,
+                 result.tm_sec,
+                 cycle_count, now() - s);
+        } else {
+          fprintf(stderr, "didn't try to decode\n");
         }
 
         sleep(2);
       }
       usleep(100 * 1000); // 0.1 seconds
     }
+    delete sin;
+    fprintf(stderr, "Sound input device has been shut down\n");
   } else if(argc == 4 && strcmp(argv[1], "-levels") == 0){
     SoundIn *sin = SoundIn::open(argv[2], argv[3], 12000);
     sin->start();
