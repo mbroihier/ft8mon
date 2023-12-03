@@ -1,4 +1,13 @@
 # ft8mon
+>[!NOTE]
+>In this fork, I added support for an RTL-SDR V3 dongle.  This code was largely taken from Guenael's(VA2GKA) repository rtlsdr-wsprd (
+https://github.com/Guenael/rtlsdr-wsprd).  I used the drivers that can be installed from
+>https://github.com/osmocom/rtl-sdr.git.  The paragraphs that follow are from the orignal README.md file with the exception of an example command that I added to show how to invoke the use of a RTL-SDR dongle.
+>
+>To run on a Raspberry PI, I also took out the reference to __int128 in unpack.cc and, at the moment, that means that the free text mode is not supported.
+>
+>Mark Broihier (KG5YJE)
+
 Demodulate the FT8 WSJT-X protocol of Taylor and Franke.
 Input from a sound card via portaudio.
 Written in C++, using FFTW.
