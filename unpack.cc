@@ -1,12 +1,13 @@
 #include <string>
 #include <mutex>
 #include <map>
+#include <vector>
 #include <string.h>
 #include <assert.h>
 #include <stdint.h>
 #include "unpack.h"
 //
-// turn bits into a 128-bit integer.
+// turn bits into a 64-bit integer.
 // most significant bit first.
 //
 int64_t
@@ -23,6 +24,30 @@ un(int a77[], int start, int len)
     x |= a77[start+i];
   }
 
+  return x;
+}
+//
+// turn bits into a vector of bytes.
+// most significant bit first.
+//
+std::vector<uint8_t>
+slow_un(int a77[], int start, int len)
+{
+  std::vector<uint8_t> x;
+  int8_t bytes = len / 8;
+  if (len % 8 != 0) bytes++;
+  for(int i = 0; i < bytes; i++) {
+    x.push_back(0);
+  }
+  for(int i = 0; i < len; i++){
+    // shift all bits in the bytes by one bit storing the most significant bit into the least of the next byte
+    for (int j = 0; j < bytes - 1; j++) {
+      x[j] <<= 1;
+      x[j] |= (0x80 & x[j+1]) != 0;
+    }
+    x[bytes - 1] <<= 1;
+    x[bytes - 1] |= a77[start+i];
+  }
   return x;
 }
 
@@ -311,6 +336,24 @@ unpack_1(int a77[])
   return call1text + (rover1 ? pr : "") + " " + call2text + (rover2 ? pr : "") + " " + gridtext;
 }
 
+std::vector<uint8_t>
+ldiv(std::vector<uint8_t> num, uint8_t divisor, uint8_t & remainder) {
+  uint16_t working = 0;
+  std::vector<uint8_t> returnResult;
+  bool firstTime = true;
+  remainder = 0;
+  for (auto b : num) { //cycle through bytes
+    working = b + (remainder << 8);  // or in new lsb's with last remainder
+    uint8_t q = working / divisor;
+    if (q > 0 || !firstTime) {  // trim off leading zeros
+      returnResult.push_back(q);
+      firstTime = false;
+    }
+    remainder = working % divisor;
+  }
+  return returnResult;
+}
+
 // free text
 // 71 bits, 13 characters, each one of 42 choices.
 // reversed.
@@ -320,11 +363,14 @@ unpack_0_0(int a77[])
 {
   // the 42 possible characters.
   const char *cc = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ+-./?";
-  int64_t x = un(a77, 0, 71);
+  std::vector<uint8_t> x  = slow_un(a77, 0, 71);
   std::string msg = "0123456789123";
+  uint8_t remainder = 0;
   for(int i = 0; i < 13; i++){
-    msg[13-1-i] = cc[x % 42];
-    x = x / 42;
+    //msg[13-1-i] = cc[x % 42];
+    //x = x / 42;
+    x = ldiv(x, 42, remainder);
+    msg[13-1-i] = cc[remainder];
   }
   return msg;
 }
@@ -471,6 +517,7 @@ unpack(int a77[])
 
   if(i3 == 0 && n3 == 0){
     // free text
+    fprintf(stdout, "free text\n");
     return unpack_0_0(a77);
   }
 

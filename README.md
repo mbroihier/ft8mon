@@ -2,9 +2,9 @@
 >[!NOTE]
 >In this fork, I added support for an RTL-SDR V3 dongle.  This code was largely taken from Guenael's(VA2GKA) repository rtlsdr-wsprd (
 https://github.com/Guenael/rtlsdr-wsprd).  I used the drivers that can be installed from
->https://github.com/osmocom/rtl-sdr.git.  The paragraphs that follow are from the orignal README.md file with the exception of an example command that I added to show how to invoke the use of a RTL-SDR dongle.
+>https://github.com/keenerd/rtl-sdr.  The paragraphs that follow are from the orignal README.md file with the exception of an example command that I added to show how to invoke the use of a RTL-SDR dongle.
 >
->To run on a Raspberry PI, I also took out the reference to __int128 in unpack.cc and, at the moment, that means that the free text mode is not supported.
+>To run on a Raspberry PI, I modified unpack.cc such that it no longer uses __int128.
 >
 >Mark Broihier (KG5YJE)
 
@@ -60,6 +60,7 @@ for the Apache ANAN-7000dle. Then try commands like these:
   ./ft8mon -card airspy ,14.074
   ./ft8mon -card hpsdr 192.168.3.100,14.074
   ./ft8mon -card sdrip 192.168.3.100,14.074
+  ./ft8mon -card rtl-sdr 14.074
 ```
 
 Robert Morris,
